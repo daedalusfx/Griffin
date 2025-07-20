@@ -1,0 +1,7 @@
+pyqt6
+pandas
+numpy
+influxdb-client
+python-dotenv
+scikit-learn
+pyqtgraph

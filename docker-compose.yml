@@ -1,0 +1,20 @@
+
+version: '3.8'
+
+services:
+  influxdb:
+    image: influxdb:latest
+    container_name: influxdb_broker_analyzer
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./influxdb_data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=my-user
+      - DOCKER_INFLUXDB_INIT_PASSWORD=BrokerLens-SecurePass-2024!
+      - DOCKER_INFLUXDB_INIT_ORG=my-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=broker_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=BrokerLens-Secret-Token-For-Data-Analysis-Project
+volumes:
+  influxdb_data: {}

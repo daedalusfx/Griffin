@@ -1,6 +1,10 @@
+# core/analysis_engine.py
+# Added smart symbol normalization logic.
+
 import logging
 import pandas as pd
 import numpy as np
+import re
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -9,10 +13,8 @@ from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal
 
 class AnalysisEngine(QObject):
     """
-    Handles all data processing and machine learning logic.
-    Emits signals to communicate with the main GUI thread.
+    Handles all data processing, machine learning, and database interactions.
     """
-    # Signal now emits two DataFrames: the report and the data for plotting
     finished = pyqtSignal(pd.DataFrame, pd.DataFrame)
     progress = pyqtSignal(int, str)
     error = pyqtSignal(str)
@@ -22,12 +24,36 @@ class AnalysisEngine(QObject):
         super().__init__()
         self.settings = {}
 
+    def _normalize_symbols(self, symbol_list):
+        """
+        Groups different broker-specific symbol variations (e.g., 'EURUSD.c', 'EURUSDm')
+        under a common base name (e.g., 'EURUSD').
+        """
+        symbol_map = {}
+        # Regex to find the base symbol (usually 6 uppercase letters)
+        base_symbol_regex = re.compile(r'([A-Z]{6})')
+        
+        for symbol in symbol_list:
+            match = base_symbol_regex.match(symbol.upper())
+            if match:
+                base = match.group(1)
+                if base not in symbol_map:
+                    symbol_map[base] = []
+                symbol_map[base].append(symbol)
+            else:
+                # Fallback for non-standard names, treat them as their own group
+                if symbol not in symbol_map:
+                    symbol_map[symbol] = [symbol]
+                    
+        return symbol_map
+
     @pyqtSlot(dict)
     def fetch_metadata(self, settings):
-        """Fetches available brokers, symbols, and timeframes from the database."""
+        """Fetches and normalizes available brokers, symbols, and timeframes."""
         try:
             self.progress.emit(20, "Connecting to DB to fetch metadata...")
-            metadata = {'brokers': [], 'symbols': [], 'timeframes': []}
+            metadata = {'brokers': [], 'symbol_map': {}, 'timeframes': []}
+            
             with InfluxDBClient(url=settings['url'], token=settings['token'], org=settings['org']) as client:
                 query_api = client.query_api()
                 def get_tag_values(tag_name):
@@ -37,14 +63,20 @@ class AnalysisEngine(QObject):
 
                 self.progress.emit(40, "Fetching brokers...")
                 metadata['brokers'] = get_tag_values("broker")
-                self.progress.emit(60, "Fetching symbols...")
-                metadata['symbols'] = get_tag_values("symbol")
+                
+                self.progress.emit(60, "Fetching and normalizing symbols...")
+                raw_symbols = get_tag_values("symbol")
+                metadata['symbol_map'] = self._normalize_symbols(raw_symbols)
+
                 self.progress.emit(80, "Fetching timeframes...")
                 metadata['timeframes'] = get_tag_values("period")
 
             if not metadata['brokers']: raise ValueError("No brokers found.")
+            if not metadata['symbol_map']: raise ValueError("No symbols found.")
+                
             self.progress.emit(100, "Metadata fetched successfully.")
             self.metadata_found.emit(metadata)
+
         except Exception as e:
             logging.error(f"Metadata fetch failed: {e}", exc_info=True)
             self.error.emit(f"Metadata fetch failed: {e}")
@@ -81,19 +113,25 @@ class AnalysisEngine(QObject):
             self.error.emit(str(e))
 
     def _get_data(self):
-        """Fetches and preprocesses data from InfluxDB."""
+        """Fetches and preprocesses data from InfluxDB using normalized symbols."""
         with InfluxDBClient(url=self.settings['url'], token=self.settings['token'], org=self.settings['org']) as client:
             brokers_filter = ' or '.join([f'r["broker"] == "{b}"' for b in self.settings['brokers']])
+            
+            # Create a filter for all symbol variations
+            symbol_variations = self.settings['symbol_map'][self.settings['base_symbol']]
+            symbol_filter = ' or '.join([f'r["symbol"] == "{s}"' for s in symbol_variations])
+
             flux_query = fr'''
             from(bucket: "{self.settings['bucket']}")
               |> range(start: -30d)
               |> filter(fn: (r) => r["_measurement"] == "price" and ({brokers_filter}))
+              |> filter(fn: (r) => {symbol_filter})
               |> filter(fn: (r) => r["_field"] == "close" or r["_field"] == "high" or r["_field"] == "low" or r["_field"] == "open")
-              |> filter(fn: (r) => r["period"] == "{self.settings['timeframe']}" and r["symbol"] == "{self.settings['symbol']}")
+              |> filter(fn: (r) => r["period"] == "{self.settings['timeframe']}")
               |> aggregateWindow(every: 1h, fn: last, createEmpty: false)
             '''
             df_raw = client.query_api().query_data_frame(query=flux_query)
-            if df_raw.empty: raise ValueError("Query returned no data.")
+            if df_raw.empty: raise ValueError("Query returned no data for the selected symbols and brokers.")
 
             df_pivot = df_raw.pivot(index=['_time', 'broker'], columns='_field', values='_value').reset_index()
             required_cols = ['open', 'high', 'low', 'close']
@@ -160,6 +198,5 @@ class AnalysisEngine(QObject):
         pca_df['Cluster'] = result_df['Cluster']
         pca_df['Profile'] = pca_df['Cluster'].map(profile_map)
         
-        # Attach explained variance info to the DataFrame's attributes
         pca_df.attrs['explained_variance'] = pca.explained_variance_ratio_
         return pca_df

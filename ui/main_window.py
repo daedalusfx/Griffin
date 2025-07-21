@@ -1,5 +1,5 @@
 # ui/main_window.py
-# Contains the MainWindow class, with bug fixes and stability improvements.
+# Updated to handle the normalized symbol map.
 
 import os
 import logging
@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QGroupBox, QTabWidget, QTableView,
     QListWidget, QComboBox, QSpinBox, QProgressBar, QStatusBar, QMessageBox,
-    QListWidgetItem, QSizePolicy
+    QListWidgetItem
 )
 from PyQt6.QtCore import QThreadPool, pyqtSlot, Qt
 
@@ -29,10 +29,11 @@ pg.setConfigOption('foreground', '#D8DEE9')
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Intelligent Broker Analyzer v1.5 (Stable)")
+        self.setWindowTitle("Griffin - Intelligent Broker Analyzer v1.6")
         self.setGeometry(100, 100, 1200, 700)
         self.thread_pool = QThreadPool()
         self.analysis_engine = AnalysisEngine()
+        self.symbol_map = {} # To store the normalized symbol data
         self.init_ui()
         self.apply_stylesheet()
         self.load_settings()
@@ -118,7 +119,6 @@ class MainWindow(QMainWindow):
         self.plot_widget = pg.PlotWidget()
         self.plot_layout.addWidget(self.plot_widget)
 
-        # FIX: Initialize hover text and connect signal only once
         self.hover_text = pg.TextItem("", anchor=(0, 1), color='#FFFFFF', fill=pg.mkBrush(0,0,0,150))
         self.plot_widget.addItem(self.hover_text)
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_hover)
@@ -150,7 +150,6 @@ class MainWindow(QMainWindow):
         self.analysis_engine.metadata_found.connect(self.on_metadata_found)
 
     def set_analysis_controls_enabled(self, enabled):
-        """Helper to enable/disable all analysis-related controls."""
         self.analysis_group.setEnabled(enabled)
         self.broker_group.setEnabled(enabled)
         self.start_button.setEnabled(enabled)
@@ -184,7 +183,9 @@ class MainWindow(QMainWindow):
         settings = {
             "url": self.db_url.text(), "token": self.db_token.text(), "org": self.db_org.text(),
             "bucket": self.db_bucket.text(), "brokers": selected_brokers,
-            "symbol": self.symbol_combo.currentText(), "timeframe": self.timeframe_combo.currentText(),
+            "base_symbol": self.symbol_combo.currentText(), # Pass the base symbol
+            "symbol_map": self.symbol_map, # Pass the full map
+            "timeframe": self.timeframe_combo.currentText(),
             "min_points": self.min_points_spin.value(), "min_brokers": 2
         }
         worker = Worker(self.analysis_engine.run_analysis, settings)
@@ -215,8 +216,11 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.CheckState.Unchecked)
             self.broker_list_widget.addItem(item)
             
+        # Store the symbol map and populate the combo box with base names
+        self.symbol_map = metadata['symbol_map']
         self.symbol_combo.clear()
-        self.symbol_combo.addItems(sorted(metadata['symbols']))
+        self.symbol_combo.addItems(sorted(self.symbol_map.keys()))
+        
         self.timeframe_combo.clear()
         self.timeframe_combo.addItems(sorted(metadata['timeframes']))
         
@@ -234,7 +238,6 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.plot_tab)
     
     def draw_plot(self, pca_df):
-        """Draws the cluster plot using PyQtGraph."""
         try:
             self.plot_widget.clear()
             variance = pca_df.attrs.get('explained_variance', [0, 0])
@@ -244,8 +247,6 @@ class MainWindow(QMainWindow):
             self.plot_widget.showGrid(x=True, y=True)
             
             legend = self.plot_widget.addLegend()
-            
-            # FIX: Use pyqtgraph's built-in colormap instead of relying on matplotlib
             colors = pg.colormap.get('viridis').getColors(mode='qcolor')
             
             for i, profile_name in enumerate(pca_df['Profile'].unique()):
@@ -254,12 +255,8 @@ class MainWindow(QMainWindow):
                 cluster_data = pca_df[pca_df['Profile'] == profile_name]
                 
                 scatter = pg.ScatterPlotItem(
-                    size=10,
-                    pen=pg.mkPen(None),
-                    brush=pg.mkBrush(color),
-                    name=profile_name
+                    size=10, pen=pg.mkPen(None), brush=pg.mkBrush(color), name=profile_name
                 )
-
                 spots = [{'pos': [row.PC1, row.PC2], 'data': row.Index} for row in cluster_data.itertuples()]
                 scatter.addPoints(spots)
                 self.plot_widget.addItem(scatter)
@@ -273,7 +270,6 @@ class MainWindow(QMainWindow):
             self.show_error(f"An error occurred while drawing the plot: {e}")
 
     def on_mouse_hover(self, pos):
-        """Shows broker name when hovering over a point."""
         try:
             point = self.plot_widget.getViewBox().mapSceneToView(pos)
             items = self.plot_widget.scene().items(pos)
@@ -288,12 +284,10 @@ class MainWindow(QMainWindow):
                     return
             self.hover_text.setText("")
         except Exception:
-            # Failsafe in case of any unexpected error during hover event
             self.hover_text.setText("")
 
     @pyqtSlot(str)
     def show_error(self, message):
-        """Shows a more user-friendly error message box."""
         self.start_button.setEnabled(True)
         self.fetch_button.setEnabled(True)
         self.status_bar.showMessage(f"Error: {message}", 5000)
@@ -301,12 +295,7 @@ class MainWindow(QMainWindow):
         
         if "No broker had enough data" in message:
             friendly_message = ("Analysis Failed: No Data\n\n"
-                                "None of the selected brokers had enough data points "
-                                "for the chosen symbol and timeframe.\n\n"
-                                "Please try:\n"
-                                "- Selecting a different symbol or timeframe.\n"
-                                "- Choosing other brokers.\n"
-                                "- Lowering the 'Minimum Data Points' value.")
+                                "None of the selected brokers had enough data points for the chosen symbol and timeframe.")
             QMessageBox.warning(self, "Data Error", friendly_message)
         else:
             QMessageBox.critical(self, "Error", message)
